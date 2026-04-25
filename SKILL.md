@@ -35,7 +35,7 @@ PY
 - If the user explicitly asks to use browser-harness, do the browsing in Chrome through this tool path. Open and activate tabs with new_tab(url), then read page_info(), page_text(), snippets(), page_links(), or screenshots from the real browser session.
 
 Available interaction skills:
-- interaction-skills/connection.md — startup sequence, tab visibility, omnibox popup fix
+- interaction-skills/connection.md — startup sequence, tab visibility, omnibox popup fix, Chrome for Testing CDP fallback
 
 Available domain skills:
 - tiktok/upload.md

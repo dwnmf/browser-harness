@@ -28,6 +28,31 @@ for t in tabs:
 tab = ensure_real_tab()
 ```
 
+## Chrome for Testing fallback
+
+If the user's regular Chrome/Edge is closed, refuses `chrome://inspect` remote debugging, or never creates `DevToolsActivePort`, use an isolated Chrome for Testing install instead of repeatedly opening inspect tabs.
+
+On Windows, launch it with an explicit CDP port and a separate profile:
+
+```powershell
+Start-Process 'C:\Tools\ChromeForTesting\chrome-win64\chrome.exe' -ArgumentList @(
+  '--remote-debugging-port=9222',
+  '--user-data-dir=C:\Tools\ChromeForTesting\UserData',
+  '--disable-infobars',
+  '--no-first-run',
+  '--no-default-browser-check',
+  'about:blank'
+)
+```
+
+`--disable-infobars` removes the Chrome for Testing banner that says the browser is intended for automated testing. After launch, verify CDP before running the harness:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:9222/json/version
+```
+
+The daemon probes `BU_CDP_PORT` (default `9222`) before falling back to `DevToolsActivePort`, so this launch shape lets `browser-harness` attach without requiring the `chrome://inspect` permission flow.
+
 ## Bringing Chrome to front
 
 If Chrome is behind other windows or on another desktop:
