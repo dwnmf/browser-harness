@@ -1,5 +1,10 @@
 import os, sys
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from admin import (
     _version,
     ensure_daemon,
@@ -21,7 +26,16 @@ HELP = """Browser Harness
 Read SKILL.md for the default workflow and examples.
 
 Typical usage:
-  uv run bh <<'PY'
+  browser-harness -c "ensure_real_tab(); print(page_info())"
+
+PowerShell stdin:
+  @'
+  ensure_real_tab()
+  print(page_info())
+  '@ | browser-harness
+
+Bash/zsh stdin:
+  browser-harness <<'PY'
   ensure_real_tab()
   print(page_info())
   PY
@@ -59,7 +73,7 @@ def main():
     elif not args and not sys.stdin.isatty():
         code = sys.stdin.read()
     else:
-        sys.exit("Usage: browser-harness -c \"print(page_info())\"")
+        sys.exit("Usage: browser-harness -c \"print(page_info())\" or pipe Python on stdin")
     print_update_banner()
     ensure_daemon()
     exec(code, globals())

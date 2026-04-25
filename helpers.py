@@ -73,6 +73,43 @@ def page_info():
             returnByValue=True)
     return json.loads(r["result"]["value"])
 
+def page_text(separator=" ", max_chars=None):
+    """Visible page text, normalized for quick research/scraping passes."""
+    text = js("return document.body ? document.body.innerText : ''") or ""
+    text = separator.join(text.split())
+    return text[:max_chars] if max_chars else text
+
+def page_links(limit=50):
+    """Visible links from the current page: [{text, href}, ...]."""
+    links = js("""
+return Array.from(document.querySelectorAll('a'))
+  .map(a => ({text: (a.innerText || a.textContent || '').trim(), href: a.href}))
+  .filter(x => x.text && x.href)
+""") or []
+    return links[:limit]
+
+def snippets(needles, context=350, limit=10):
+    """Find text snippets around one or more needles in the current page."""
+    if isinstance(needles, str):
+        needles = [needles]
+    text = page_text()
+    low = text.lower()
+    out = []
+    for needle in needles:
+        n = needle.lower()
+        start = 0
+        while len(out) < limit:
+            idx = low.find(n, start)
+            if idx < 0:
+                break
+            out.append(text[max(0, idx - context):idx + len(needle) + context])
+            start = idx + len(needle)
+    return out
+
+def print_json(value):
+    """Pretty-print data without escaping non-ASCII text."""
+    print(json.dumps(value, ensure_ascii=False, indent=2))
+
 # --- input ---
 _debug_click_counter = 0
 
