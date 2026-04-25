@@ -1,4 +1,5 @@
-import os, sys
+import json, os, socket, sys, tempfile
+from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -20,6 +21,8 @@ from admin import (
     sync_local_profile,
 )
 from helpers import *
+
+NAME = os.environ.get("BU_NAME", "default")
 
 HELP = """Browser Harness
 
@@ -45,9 +48,31 @@ Helpers are pre-imported. The daemon auto-starts and connects to the running bro
 Commands:
   browser-harness --version        print the installed version
   browser-harness --doctor         diagnose install, daemon, and browser state
+  browser-harness --paths          print editable harness files and daemon endpoint
   browser-harness --setup          interactively attach to your running browser
   browser-harness --update [-y]    pull the latest version (agents: pass -y)
 """
+
+
+def _paths():
+    root = Path(__file__).resolve().parent
+    tmp = Path(tempfile.gettempdir())
+    supports_unix = hasattr(socket, "AF_UNIX")
+    port = int(os.environ.get("BU_PORT", 39300 + (sum(ord(c) for c in NAME) % 1000)))
+    return {
+        "name": NAME,
+        "endpoint": f"/tmp/bu-{NAME}.sock" if supports_unix else f"127.0.0.1:{port}",
+        "log": str(tmp / f"bu-{NAME}.log"),
+        "pid": str(tmp / f"bu-{NAME}.pid"),
+        "files": {
+            "run": str(root / "run.py"),
+            "helpers": str(root / "helpers.py"),
+            "daemon": str(root / "daemon.py"),
+            "admin": str(root / "admin.py"),
+            "skill": str(root / "SKILL.md"),
+            "install": str(root / "install.md"),
+        },
+    }
 
 
 def main():
@@ -60,6 +85,9 @@ def main():
         return
     if args and args[0] == "--doctor":
         sys.exit(run_doctor())
+    if args and args[0] == "--paths":
+        print(json.dumps(_paths(), ensure_ascii=False, indent=2))
+        return
     if args and args[0] == "--setup":
         sys.exit(run_setup())
     if args and args[0] == "--update":

@@ -60,6 +60,16 @@ PY
 
 run.py calls ensure_daemon() before exec — you never start/stop manually unless you want to.
 
+## Bitter-lesson workflow
+
+Keep the harness thin and visible:
+
+- Prefer raw `cdp("Domain.method", ...)` when a helper is not enough.
+- If a useful primitive is missing, read/edit `helpers.py` directly and rerun. Do not build a manager layer, retry framework, selector abstraction, or hidden browser framework.
+- Use `browser-harness --paths` to find the editable harness files, daemon log, and endpoint.
+- Use `browser_state()` for a compact target/session/page/event dump before inventing recovery code.
+- Use `current_session()`, `use_session(session_id)`, and `attach_target(target_id)` when CDP target/session issues surface. Let Chrome/CDP errors stay visible so the agent can repair the exact failing path.
+
 ### Remote browsers
 
 Use remote for parallel sub-agents (each gets its own isolated browser via a distinct BU_NAME) or on a headless server. BROWSER_USE_API_KEY must be set. start_remote_daemon, list_cloud_profiles, list_local_profiles, sync_local_profile are pre-imported.
@@ -152,6 +162,7 @@ The *durable* shape of the site — the map, not the diary. Focus on what the ne
 - Wrong/stale tab: ensure_real_tab(). Use it when the current tab is stale or internal; the daemon also auto-recovers from stale sessions on the next call.
 - Verification: print(page_info()) is the simplest "is this alive?" check, but screenshots are the default way to verify whether a visible action actually worked.
 - DOM reads: use page_text(), snippets([...]), page_links(), or js(...) for inspection and extraction when the screenshot shows that coordinates are the wrong tool.
+- Target/session debugging: use browser_state(), current_session(), attach_target(target_id), and raw Target.* CDP calls.
 - Iframe sites (Azure blades, Salesforce): click_at_xy(x, y) passes through; only drop to iframe DOM work when coordinate clicks are the wrong tool.
 - Auth wall: redirected to login → stop and ask the user. Don't type credentials from screenshots.
 - Raw CDP for anything helpers don't cover: cdp("Domain.method", params).

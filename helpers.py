@@ -51,6 +51,10 @@ def cdp(method, session_id=None, **params):
 
 
 def drain_events():  return _send({"meta": "drain_events"})["events"]
+def current_session(): return _send({"meta": "session"})["session_id"]
+def use_session(session_id):
+    """Switch the default CDP session. Useful after manually attaching to a target."""
+    return _send({"meta": "set_session", "session_id": session_id})["session_id"]
 
 
 # --- navigation / page ---
@@ -179,8 +183,38 @@ def list_tabs(include_chrome=True):
     return out
 
 def current_tab():
+    try:
+        info = page_info()
+        url = info.get("url")
+        title = info.get("title", "").removeprefix("\U0001F7E2 ")
+        for t in list_tabs(include_chrome=True):
+            if url and t.get("url") == url:
+                return t
+            if title and t.get("title", "").removeprefix("\U0001F7E2 ") == title:
+                return t
+    except Exception:
+        pass
     t = cdp("Target.getTargetInfo").get("targetInfo", {})
     return {"targetId": t.get("targetId"), "url": t.get("url", ""), "title": t.get("title", "")}
+
+def attach_target(target_id, activate=True):
+    """Attach to any CDP target and make it the default session."""
+    if activate:
+        try: cdp("Target.activateTarget", targetId=target_id)
+        except Exception: pass
+    sid = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"]
+    return use_session(sid)
+
+def browser_state(include_chrome=False, events=10):
+    """Compact state dump for debugging target/session/page issues."""
+    ev = drain_events()
+    return {
+        "session_id": current_session(),
+        "current_tab": current_tab(),
+        "page_info": page_info(),
+        "tabs": list_tabs(include_chrome=include_chrome),
+        "events": ev[-events:],
+    }
 
 def _mark_tab():
     """Prepend 🟢 to tab title so the user can see which tab the agent controls."""
