@@ -167,6 +167,7 @@ The *durable* shape of the site — the map, not the diary. Focus on what the ne
 - Wrong/stale tab: ensure_real_tab(). Use it when the current tab is stale or internal; the daemon also auto-recovers from stale sessions on the next call.
 - Verification: print(page_info()) is the simplest "is this alive?" check, but screenshots are the default way to verify whether a visible action actually worked.
 - DOM reads: use page_text(), snippets([...]), page_links(), or js(...) for inspection and extraction when the screenshot shows that coordinates are the wrong tool.
+- JS data: pass Python values to `js()` as positional args and read them with JS `arguments`; pass iframe/target ids only as `target_id=...`.
 - Target/session debugging: use browser_state(), current_session(), attach_target(target_id), and raw Target.* CDP calls.
 - Iframe sites (Azure blades, Salesforce): click_at_xy(x, y) passes through; only drop to iframe DOM work when coordinate clicks are the wrong tool.
 - Auth wall: redirected to login → stop and ask the user. Don't type credentials from screenshots.

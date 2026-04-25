@@ -409,14 +409,18 @@ def wait_for_load(timeout=15.0):
         time.sleep(0.3)
     return False
 
-def js(expression, target_id=None):
+def js(expression, *args, target_id=None):
     """Run JS in the attached tab (default) or inside an iframe target (via iframe_target()).
 
     Expressions with top-level `return` are automatically wrapped in an IIFE, so both
-    `document.title` and `const x = 1; return x` are valid inputs.
+    `document.title` and `const x = 1; return x` are valid inputs. Positional
+    Python args are exposed as JS `arguments`; pass iframe targets as
+    `target_id=...` so data is not mistaken for a CDP target id.
     """
     sid = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"] if target_id else None
-    if "return " in expression and not expression.strip().startswith("("):
+    if args:
+        expression = f"(function(){{{expression}}}).apply(null, {json.dumps(args)})"
+    elif "return " in expression and not expression.strip().startswith("("):
         expression = f"(function(){{{expression}}})()"
     r = cdp("Runtime.evaluate", session_id=sid, expression=expression, returnByValue=True, awaitPromise=True)
     return r.get("result", {}).get("value")

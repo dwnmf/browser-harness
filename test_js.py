@@ -33,3 +33,22 @@ def test_iife_with_internal_return_is_not_double_wrapped():
     with patch("helpers.cdp", side_effect=fake_cdp):
         helpers.js("(function(){ return document.title; })()")
     assert _evaluated_expression(captured) == "(function(){ return document.title; })()"
+
+
+def test_positional_args_are_js_arguments():
+    fake_cdp, captured = _capture_cdp()
+    with patch("helpers.cdp", side_effect=fake_cdp):
+        helpers.js("const email = arguments[0]; return email", "a@example.com")
+    assert _evaluated_expression(captured) == '(function(){const email = arguments[0]; return email}).apply(null, ["a@example.com"])'
+
+
+def test_target_id_is_keyword_only():
+    captured = []
+    def fake_cdp(method, **kwargs):
+        captured.append((method, kwargs))
+        if method == "Target.attachToTarget":
+            return {"sessionId": "SESSION123"}
+        return {"result": {"value": None}}
+    with patch("helpers.cdp", side_effect=fake_cdp):
+        helpers.js("document.title", target_id="TARGET123")
+    assert captured[0] == ("Target.attachToTarget", {"targetId": "TARGET123", "flatten": True})
