@@ -54,11 +54,15 @@ def main():
     if args and args[0] == "--debug-clicks":
         os.environ["BH_DEBUG_CLICKS"] = "1"
         args = args[1:]
-    if not args or args[0] != "-c":
+    if args and args[0] == "-c":
+        code = args[1]
+    elif not args and not sys.stdin.isatty():
+        code = sys.stdin.read()
+    else:
         sys.exit("Usage: browser-harness -c \"print(page_info())\"")
     print_update_banner()
     ensure_daemon()
-    exec(args[1], globals())
+    exec(code, globals())
 
 
 if __name__ == "__main__":

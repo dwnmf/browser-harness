@@ -1,5 +1,6 @@
 """CDP WS holder + Unix socket relay. One daemon per BU_NAME."""
 import asyncio, json, os, socket, sys, time, urllib.request
+import tempfile
 from collections import deque
 from pathlib import Path
 
@@ -21,9 +22,13 @@ def _load_env():
 _load_env()
 
 NAME = os.environ.get("BU_NAME", "default")
+SUPPORTS_UNIX = hasattr(socket, "AF_UNIX")
+HOST = "127.0.0.1"
+PORT = int(os.environ.get("BU_PORT", 39300 + (sum(ord(c) for c in NAME) % 1000)))
 SOCK = f"/tmp/bu-{NAME}.sock"
-LOG = f"/tmp/bu-{NAME}.log"
-PID = f"/tmp/bu-{NAME}.pid"
+TMP = Path(tempfile.gettempdir())
+LOG = str(TMP / f"bu-{NAME}.log")
+PID = str(TMP / f"bu-{NAME}.pid")
 BUF = 500
 PROFILES = [
     Path.home() / "Library/Application Support/Google/Chrome",
@@ -61,6 +66,15 @@ def log(msg):
 def get_ws_url():
     if url := os.environ.get("BU_CDP_WS"):
         return url
+    for port in os.environ.get("BU_CDP_PORT", "9222").split(","):
+        port = port.strip()
+        if not port:
+            continue
+        try:
+            version = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1).read())
+            return version["webSocketDebuggerUrl"]
+        except Exception:
+            pass
     for base in PROFILES:
         try:
             port, path = (base / "DevToolsActivePort").read_text().strip().split("\n", 1)
@@ -192,7 +206,7 @@ class Daemon:
 
 
 async def serve(d):
-    if os.path.exists(SOCK):
+    if SUPPORTS_UNIX and os.path.exists(SOCK):
         os.unlink(SOCK)
 
     async def handler(reader, writer):
@@ -212,9 +226,14 @@ async def serve(d):
         finally:
             writer.close()
 
-    server = await asyncio.start_unix_server(handler, path=SOCK)
-    os.chmod(SOCK, 0o600)
-    log(f"listening on {SOCK} (name={NAME}, remote={REMOTE_ID or 'local'})")
+    if SUPPORTS_UNIX:
+        server = await asyncio.start_unix_server(handler, path=SOCK)
+        os.chmod(SOCK, 0o600)
+        endpoint = SOCK
+    else:
+        server = await asyncio.start_server(handler, HOST, PORT)
+        endpoint = f"{HOST}:{PORT}"
+    log(f"listening on {endpoint} (name={NAME}, remote={REMOTE_ID or 'local'})")
     async with server:
         await d.stop.wait()
 
@@ -227,9 +246,14 @@ async def main():
 
 def already_running():
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(1)
-        s.connect(SOCK); s.close(); return True
-    except (FileNotFoundError, ConnectionRefusedError, socket.timeout):
+        if SUPPORTS_UNIX:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(1)
+            s.connect(SOCK)
+        else:
+            s = socket.create_connection((HOST, PORT), timeout=1)
+        s.close(); return True
+    except (FileNotFoundError, ConnectionRefusedError, OSError, socket.timeout):
         return False
 
 

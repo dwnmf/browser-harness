@@ -1,6 +1,7 @@
 import json
 import os
 import socket
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -21,33 +22,49 @@ def _load_env():
 _load_env()
 
 NAME = os.environ.get("BU_NAME", "default")
+SUPPORTS_UNIX = hasattr(socket, "AF_UNIX")
+HOST = "127.0.0.1"
+PORT_BASE = 39300
 BU_API = "https://api.browser-use.com/api/v3"
 GH_RELEASES = "https://api.github.com/repos/browser-use/browser-harness/releases/latest"
-VERSION_CACHE = Path("/tmp/bu-version-cache.json")
+TMP = Path(tempfile.gettempdir())
+VERSION_CACHE = TMP / "bu-version-cache.json"
 VERSION_CACHE_TTL = 24 * 3600
 
 
 def _paths(name):
     n = name or NAME
-    return f"/tmp/bu-{n}.sock", f"/tmp/bu-{n}.pid"
+    port = int(os.environ.get("BU_PORT", PORT_BASE + (sum(ord(c) for c in n) % 1000)))
+    endpoint = f"/tmp/bu-{n}.sock" if SUPPORTS_UNIX else f"{HOST}:{port}"
+    return endpoint, str(TMP / f"bu-{n}.pid")
 
 
 def _log_tail(name):
-    p = f"/tmp/bu-{name or NAME}.log"
+    p = TMP / f"bu-{name or NAME}.log"
     try:
         return Path(p).read_text().strip().splitlines()[-1]
     except (FileNotFoundError, IndexError):
         return None
 
 
+def _connect(name=None, timeout=1):
+    endpoint, _ = _paths(name)
+    if SUPPORTS_UNIX:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(endpoint)
+    else:
+        host, port = endpoint.rsplit(":", 1)
+        s = socket.create_connection((host, int(port)), timeout=timeout)
+    return s
+
+
 def daemon_alive(name=None):
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(1)
-        s.connect(_paths(name)[0])
+        s = _connect(name, timeout=1)
         s.close()
         return True
-    except (FileNotFoundError, ConnectionRefusedError, socket.timeout):
+    except (FileNotFoundError, ConnectionRefusedError, OSError, socket.timeout):
         return False
 
 
@@ -57,8 +74,7 @@ def ensure_daemon(wait=60.0, name=None, env=None):
         # Stale daemons accept connects AND reply to meta:* (pure Python) even when the
         # CDP WS to Chrome is dead — probe with a real CDP call and require "result".
         try:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(3)
-            s.connect(_paths(name)[0])
+            s = _connect(name, timeout=3)
             s.sendall(b'{"method":"Target.getTargets","params":{}}\n')
             data = b""
             while not data.endswith(b"\n"):
@@ -89,7 +105,7 @@ def ensure_daemon(wait=60.0, name=None, env=None):
             print("browser-harness: click Allow on chrome://inspect (and tick the checkbox if shown)", file=sys.stderr)
             restart_daemon(name)
             continue
-        raise RuntimeError(msg or f"daemon {name or NAME} didn't come up -- check /tmp/bu-{name or NAME}.log")
+        raise RuntimeError(msg or f"daemon {name or NAME} didn't come up -- check {TMP / ('bu-' + (name or NAME) + '.log')}")
 
 
 def stop_remote_daemon(name="remote"):
@@ -116,9 +132,7 @@ def restart_daemon(name=None):
 
     sock, pid_path = _paths(name)
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(5)
-        s.connect(sock)
+        s = _connect(name, timeout=5)
         s.sendall(b'{"meta":"shutdown"}\n')
         s.recv(1024)
         s.close()
@@ -140,7 +154,10 @@ def restart_daemon(name=None):
                 os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
-    for f in (sock, pid_path):
+    cleanup = [pid_path]
+    if SUPPORTS_UNIX:
+        cleanup.append(sock)
+    for f in cleanup:
         try:
             os.unlink(f)
         except FileNotFoundError:
@@ -429,6 +446,22 @@ def _open_chrome_inspect():
     """Open chrome://inspect/#remote-debugging so the user can tick the checkbox."""
     import platform, subprocess, webbrowser
     url = "chrome://inspect/#remote-debugging"
+    if platform.system() == "Windows":
+        candidates = [
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
+            Path(os.environ.get("PROGRAMFILES", "")) / "Google/Chrome/Application/chrome.exe",
+            Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Google/Chrome/Application/chrome.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft/Edge/Application/msedge.exe",
+            Path(os.environ.get("PROGRAMFILES", "")) / "Microsoft/Edge/Application/msedge.exe",
+            Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Microsoft/Edge/Application/msedge.exe",
+        ]
+        for exe in candidates:
+            if exe.is_file():
+                try:
+                    subprocess.Popen([str(exe), url])
+                    return
+                except Exception:
+                    pass
     if platform.system() == "Darwin":
         try:
             subprocess.run([

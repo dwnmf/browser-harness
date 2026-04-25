@@ -19,13 +19,20 @@ def _load_env():
 _load_env()
 
 NAME = os.environ.get("BU_NAME", "default")
+SUPPORTS_UNIX = hasattr(socket, "AF_UNIX")
 SOCK = f"/tmp/bu-{NAME}.sock"
+HOST = "127.0.0.1"
+PORT = int(os.environ.get("BU_PORT", 39300 + (sum(ord(c) for c in NAME) % 1000)))
 INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension://", "about:")
 
 
 def _send(req):
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(SOCK)
+    if SUPPORTS_UNIX:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(SOCK)
+    else:
+        s = socket.create_connection((HOST, PORT), timeout=5)
+        s.settimeout(None)
     s.sendall((json.dumps(req) + "\n").encode())
     data = b""
     while not data.endswith(b"\n"):
