@@ -1,5 +1,5 @@
 """Browser control via CDP. Read, edit, extend -- this file is yours."""
-import base64, json, os, socket, time, urllib.request
+import base64, csv, io, json, os, platform, socket, subprocess, time, urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -181,6 +181,140 @@ def list_tabs(include_chrome=True):
         if not include_chrome and url.startswith(INTERNAL): continue
         out.append({"targetId": t["targetId"], "title": t.get("title", ""), "url": url})
     return out
+
+def _browser_process_stats():
+    """Best-effort local Chrome/Edge process count and RSS in MB."""
+    names = ("chrome.exe", "msedge.exe") if platform.system() == "Windows" else ("Google Chrome", "chrome", "chromium", "msedge")
+    try:
+        if platform.system() == "Windows":
+            out = subprocess.check_output(["tasklist", "/FO", "CSV"], text=True, timeout=5)
+            rows = csv.DictReader(io.StringIO(out))
+            count, rss_kb = 0, 0
+            for row in rows:
+                image = (row.get("Image Name") or "").lower()
+                if image not in names:
+                    continue
+                count += 1
+                mem = (row.get("Mem Usage") or "0").replace("\xa0", " ").replace(",", "")
+                digits = "".join(ch for ch in mem if ch.isdigit())
+                rss_kb += int(digits or "0")
+            return {"chrome_processes": count, "rss_mb": round(rss_kb / 1024)}
+        out = subprocess.check_output(["ps", "-A", "-o", "comm=,rss="], text=True, timeout=5)
+        count, rss_kb = 0, 0
+        for line in out.splitlines():
+            parts = line.rsplit(None, 1)
+            if len(parts) != 2:
+                continue
+            comm, rss = parts
+            if not any(name.lower() in comm.lower() for name in names):
+                continue
+            count += 1
+            rss_kb += int(rss)
+        return {"chrome_processes": count, "rss_mb": round(rss_kb / 1024)}
+    except Exception:
+        return {"chrome_processes": None, "rss_mb": None}
+
+def browser_pressure(tab_warn=12, tab_critical=25, rss_warn_mb=1500, rss_critical_mb=3000):
+    """Quiet browser pressure check. Returns data; prints nothing and closes nothing."""
+    tabs = list_tabs(include_chrome=True)
+    real_tabs = [t for t in tabs if not t.get("url", "").startswith(INTERNAL)]
+    internal_tabs = len(tabs) - len(real_tabs)
+    stats = _browser_process_stats()
+    tab_count = len(tabs)
+    rss_mb = stats["rss_mb"]
+    pressure = "ok"
+    if tab_count >= tab_critical or (rss_mb is not None and rss_mb >= rss_critical_mb):
+        pressure = "critical"
+    elif tab_count >= tab_warn or (rss_mb is not None and rss_mb >= rss_warn_mb):
+        pressure = "warn"
+    suggestion = None
+    if pressure == "critical":
+        suggestion = "reuse_tab_or_close_harness_tabs"
+    elif pressure == "warn":
+        suggestion = "reuse_tab"
+    cur = current_tab()
+    return {
+        "tabs": tab_count,
+        "real_tabs": len(real_tabs),
+        "internal_tabs": internal_tabs,
+        "chrome_processes": stats["chrome_processes"],
+        "rss_mb": rss_mb,
+        "active_tab_url": cur.get("url", ""),
+        "pressure": pressure,
+        "suggestion": suggestion,
+    }
+
+tab_pressure = browser_pressure
+
+def _same_host(a, b):
+    try:
+        return (urlparse(a).hostname or "").removeprefix("www.") == (urlparse(b).hostname or "").removeprefix("www.")
+    except Exception:
+        return False
+
+def reuse_or_new_tab(url="about:blank", reuse_host=True, max_tabs=15):
+    """Open `url`, preferring an existing tab before creating more browser pressure.
+
+    Reuse order: exact URL, same host when `reuse_host` is true, then the current
+    real tab once `max_tabs` is reached. Returns the target id in all cases.
+    """
+    tabs = list_tabs(include_chrome=False)
+    for t in tabs:
+        if t.get("url") == url:
+            switch_tab(t["targetId"])
+            return t["targetId"]
+    if url != "about:blank" and reuse_host:
+        for t in tabs:
+            if _same_host(t.get("url", ""), url):
+                switch_tab(t["targetId"])
+                goto_url(url)
+                return t["targetId"]
+    if len(list_tabs(include_chrome=True)) >= max_tabs and url != "about:blank":
+        try:
+            cur = current_tab()
+            if cur.get("targetId") and cur.get("url") and not cur["url"].startswith(INTERNAL):
+                goto_url(url)
+                return cur["targetId"]
+        except Exception:
+            pass
+        if tabs:
+            switch_tab(tabs[0]["targetId"])
+            goto_url(url)
+            return tabs[0]["targetId"]
+    return new_tab(url)
+
+open_or_reuse_tab = reuse_or_new_tab
+
+def close_harness_tabs(keep_current=True, close_blank=True, close_inspect=True, close_duplicate_urls=False):
+    """Close clearly technical harness tabs. Does not close arbitrary user pages."""
+    current_id = None
+    if keep_current:
+        try:
+            current_id = current_tab().get("targetId")
+        except Exception:
+            current_id = None
+    seen_urls = set()
+    closed = []
+    for t in list_tabs(include_chrome=True):
+        tid, url = t.get("targetId"), t.get("url", "")
+        if keep_current and tid == current_id:
+            seen_urls.add(url)
+            continue
+        technical = (
+            (close_blank and url == "about:blank") or
+            (close_inspect and url.startswith("chrome://inspect")) or
+            (close_duplicate_urls and url and url in seen_urls and not url.startswith(INTERNAL))
+        )
+        if not technical:
+            seen_urls.add(url)
+            continue
+        try:
+            cdp("Target.closeTarget", targetId=tid)
+            closed.append(t)
+        except Exception:
+            pass
+        seen_urls.add(url)
+    return closed
 
 def current_tab():
     try:

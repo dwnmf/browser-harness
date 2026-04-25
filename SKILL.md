@@ -69,6 +69,9 @@ Keep the harness thin and visible:
 - If a useful primitive is missing, read/edit `helpers.py` directly and rerun. Do not build a manager layer, retry framework, selector abstraction, or hidden browser framework.
 - Use `browser-harness --paths` to find the editable harness files, daemon log, and endpoint.
 - Use `browser_state()` for a compact target/session/page/event dump before inventing recovery code.
+- Use `browser_pressure()` when tabs/RAM may be getting high; it is a quiet data helper, so only mention it to the user when it reports `warn`/`critical` or changes your next action.
+- Use `reuse_or_new_tab(url)` instead of `new_tab(url)` when repeated searches or source checks might create tab pressure.
+- Use `close_harness_tabs()` only for clearly technical tabs (`about:blank`, `chrome://inspect`); do not close arbitrary user pages without asking.
 - Use `current_session()`, `use_session(session_id)`, and `attach_target(target_id)` when CDP target/session issues surface. Let Chrome/CDP errors stay visible so the agent can repair the exact failing path.
 
 ### Remote browsers
@@ -160,6 +163,7 @@ The *durable* shape of the site — the map, not the diary. Focus on what the ne
 - Clicking: capture_screenshot() → read the pixel off the image → click_at_xy(x, y) → capture_screenshot() to verify. Suppress the Playwright-habit reflex of "locate first, then click" — no getBoundingClientRect, no selector hunt. Drop to DOM only when the target has no visible geometry (hidden input, 0×0 node). Hit-testing happens in Chrome's browser process, so clicks go through iframes / shadow DOM / cross-origin without extra work.
 - Bulk HTTP: http_get(url) + ThreadPoolExecutor. No browser for static pages (249 Netflix pages in 2.8s).
 - After goto: wait_for_load().
+- Tab/RAM guardrails: `browser_pressure()` returns `{tabs, real_tabs, internal_tabs, chrome_processes, rss_mb, pressure, suggestion}` without printing. `reuse_or_new_tab(url)` reuses exact/same-host tabs before opening another tab. `close_harness_tabs()` closes only technical harness tabs by default.
 - Wrong/stale tab: ensure_real_tab(). Use it when the current tab is stale or internal; the daemon also auto-recovers from stale sessions on the next call.
 - Verification: print(page_info()) is the simplest "is this alive?" check, but screenshots are the default way to verify whether a visible action actually worked.
 - DOM reads: use page_text(), snippets([...]), page_links(), or js(...) for inspection and extraction when the screenshot shows that coordinates are the wrong tool.

@@ -446,6 +446,13 @@ def _open_chrome_inspect():
     """Open chrome://inspect/#remote-debugging so the user can tick the checkbox."""
     import platform, subprocess, webbrowser
     url = "chrome://inspect/#remote-debugging"
+    marker = TMP / f"bu-{NAME}-inspect-opened"
+    try:
+        if marker.exists() and time.time() - marker.stat().st_mtime < 120:
+            return
+        marker.write_text(str(time.time()))
+    except Exception:
+        pass
     if platform.system() == "Windows":
         candidates = [
             Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
