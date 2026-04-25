@@ -39,13 +39,20 @@ Start-Process 'C:\Tools\ChromeForTesting\chrome-win64\chrome.exe' -ArgumentList 
   '--remote-debugging-port=9222',
   '--user-data-dir=C:\Tools\ChromeForTesting\UserData',
   '--disable-infobars',
+  '--disable-notifications',
+  '--deny-permission-prompts',
+  '--disable-popup-blocking',
+  '--disable-search-engine-choice-screen',
+  '--disable-save-password-bubble',
+  '--disable-translate',
+  '--disable-features=AutofillServerCommunication,ChromeWhatsNewUI,MediaRouter,OptimizationHints,PasswordManagerOnboarding,PrivacySandboxSettings4,SigninIntercept,Translate',
   '--no-first-run',
   '--no-default-browser-check',
   'about:blank'
 )
 ```
 
-`--disable-infobars` removes the Chrome for Testing banner that says the browser is intended for automated testing. After launch, verify CDP before running the harness:
+`--disable-infobars` removes the Chrome for Testing banner that says the browser is intended for automated testing. For a quieter local agent profile, also pre-seed `UserData\Default\Preferences` to block notifications, geolocation, microphone/camera prompts, clipboard prompts, password manager bubbles, autofill, translate, sign-in nudges, and default-browser checks. Keep this local hardening separate from remote stealth/anti-bot behavior; it is for reducing browser UI noise, not bypassing CAPTCHA/2FA. After launch, verify CDP before running the harness:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:9222/json/version
