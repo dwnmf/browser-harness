@@ -51,6 +51,7 @@ Commands:
   browser-harness --paths          print editable harness files and daemon endpoint
   browser-harness --setup          interactively attach to your running browser
   browser-harness --update [-y]    pull the latest version (agents: pass -y)
+  browser-harness --reload         stop the daemon so next call picks up code changes
 """
 
 
@@ -93,6 +94,10 @@ def main():
     if args and args[0] == "--update":
         yes = any(a in {"-y", "--yes"} for a in args[1:])
         sys.exit(run_update(yes=yes))
+    if args and args[0] == "--reload":
+        restart_daemon()
+        print("daemon stopped — will restart fresh on next call")
+        return
     if args and args[0] == "--debug-clicks":
         os.environ["BH_DEBUG_CLICKS"] = "1"
         args = args[1:]

@@ -39,6 +39,7 @@ Available interaction skills:
 
 Available domain skills:
 - tiktok/upload.md
+- polymarket/scraping.md
 
 ## Tool call shape
 
