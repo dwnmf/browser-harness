@@ -16,7 +16,7 @@ When you open a setup or verification tab, activate it so the user can actually 
 Clone the repo once into a durable location, then install it as an editable tool so `browser-harness` works from any directory:
 
 ```bash
-git clone https://github.com/browser-use/browser-harness
+git clone https://github.com/dwnmf/browser-harness
 cd browser-harness
 uv tool install -e .
 command -v browser-harness
