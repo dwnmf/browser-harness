@@ -1,13 +1,29 @@
-"""Browser control via CDP. Read, edit, extend -- this file is yours."""
-import base64, csv, io, json, os, platform, socket, subprocess, time, urllib.request
+"""Browser control via CDP.
+
+Core helpers live here. Agent-editable helpers live in
+BH_AGENT_WORKSPACE/agent_helpers.py.
+"""
+import base64, csv, importlib.util, io, json, math, os, platform, subprocess, tempfile, time, urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import _ipc as ipc
+
+
+CORE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = CORE_DIR.parent.parent
+AGENT_WORKSPACE = Path(os.environ.get("BH_AGENT_WORKSPACE", REPO_ROOT / "agent-workspace")).expanduser()
+
 
 def _load_env():
-    p = Path(__file__).parent / ".env"
-    if not p.exists():
-        return
+    paths = [REPO_ROOT / ".env", AGENT_WORKSPACE / ".env"]
+    for p in paths:
+        if not p.exists():
+            continue
+        _load_env_file(p)
+
+
+def _load_env_file(p):
     for line in p.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -19,27 +35,19 @@ def _load_env():
 _load_env()
 
 NAME = os.environ.get("BU_NAME", "default")
-SUPPORTS_UNIX = hasattr(socket, "AF_UNIX")
-SOCK = f"/tmp/bu-{NAME}.sock"
-HOST = "127.0.0.1"
-PORT = int(os.environ.get("BU_PORT", 39300 + (sum(ord(c) for c in NAME) % 1000)))
+SOCK = ipc.sock_addr(NAME)
 INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension://", "about:")
 
 
 def _send(req):
-    if SUPPORTS_UNIX:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(SOCK)
-    else:
-        s = socket.create_connection((HOST, PORT), timeout=5)
-        s.settimeout(None)
-    s.sendall((json.dumps(req) + "\n").encode())
+    c = ipc.connect(NAME, timeout=5.0)
+    c.sendall((json.dumps(req) + "\n").encode())
     data = b""
     while not data.endswith(b"\n"):
-        chunk = s.recv(1 << 20)
+        chunk = c.recv(1 << 20)
         if not chunk: break
         data += chunk
-    s.close()
+    c.close()
     r = json.loads(data)
     if "error" in r: raise RuntimeError(r["error"])
     return r
@@ -51,16 +59,110 @@ def cdp(method, session_id=None, **params):
 
 
 def drain_events():  return _send({"meta": "drain_events"})["events"]
-def current_session(): return _send({"meta": "session"})["session_id"]
-def use_session(session_id):
-    """Switch the default CDP session. Useful after manually attaching to a target."""
-    return _send({"meta": "set_session", "session_id": session_id})["session_id"]
+
+
+def _js_snippet(expression, limit=160):
+    snippet = expression.strip().replace("\n", "\\n")
+    return snippet[:limit - 3] + "..." if len(snippet) > limit else snippet
+
+
+def _js_exception_description(result, details):
+    desc = result.get("description")
+    exc = details.get("exception") if details else None
+    if not desc and isinstance(exc, dict):
+        desc = exc.get("description")
+        if desc is None and "value" in exc:
+            desc = str(exc["value"])
+        if desc is None:
+            desc = exc.get("className")
+    if not desc and details:
+        desc = details.get("text")
+    return desc or "JavaScript evaluation failed"
+
+
+def _decode_unserializable_js_value(value):
+    if value == "NaN":
+        return math.nan
+    if value == "Infinity":
+        return math.inf
+    if value == "-Infinity":
+        return -math.inf
+    if value == "-0":
+        return -0.0
+    if value.endswith("n"):
+        return int(value[:-1])
+    return value
+
+
+def _runtime_value(response, expression):
+    result = response.get("result", {})
+    details = response.get("exceptionDetails")
+    if details or result.get("subtype") == "error":
+        desc = _js_exception_description(result, details)
+        if details:
+            line = details.get("lineNumber")
+            col = details.get("columnNumber")
+            loc = f" at line {line}, column {col}" if line is not None and col is not None else ""
+        else:
+            loc = ""
+        raise RuntimeError(f"JavaScript evaluation failed{loc}: {desc}; expression: {_js_snippet(expression)}")
+    if "value" in result:
+        return result["value"]
+    if "unserializableValue" in result:
+        return _decode_unserializable_js_value(result["unserializableValue"])
+    return None
+
+
+def _runtime_evaluate(expression, session_id=None, await_promise=False):
+    try:
+        r = cdp("Runtime.evaluate", session_id=session_id, expression=expression, returnByValue=True, awaitPromise=await_promise)
+    except TimeoutError as e:
+        raise RuntimeError(f"Runtime.evaluate timed out; expression: {_js_snippet(expression)}") from e
+    return _runtime_value(r, expression)
+
+
+def _has_return_statement(expression):
+    i = 0
+    n = len(expression)
+    state = "code"
+    quote = ""
+    while i < n:
+        ch = expression[i]
+        nxt = expression[i + 1] if i + 1 < n else ""
+        if state == "code":
+            if ch in ("'", '"', "`"):
+                state = "string"; quote = ch; i += 1; continue
+            if ch == "/" and nxt == "/":
+                state = "line_comment"; i += 2; continue
+            if ch == "/" and nxt == "*":
+                state = "block_comment"; i += 2; continue
+            if expression.startswith("return", i):
+                before = expression[i - 1] if i > 0 else ""
+                after = expression[i + 6] if i + 6 < n else ""
+                if not (before == "_" or before.isalnum()) and not (after == "_" or after.isalnum()):
+                    return True
+            i += 1; continue
+        if state == "line_comment":
+            if ch == "\n":
+                state = "code"
+            i += 1; continue
+        if state == "block_comment":
+            if ch == "*" and nxt == "/":
+                state = "code"; i += 2; continue
+            i += 1; continue
+        if state == "string":
+            if ch == "\\":
+                i += 2; continue
+            if ch == quote:
+                state = "code"; quote = ""
+            i += 1; continue
+    return False
 
 
 # --- navigation / page ---
 def goto_url(url):
     r = cdp("Page.navigate", url=url)
-    d = (Path(__file__).parent / "domain-skills" / (urlparse(url).hostname or "").removeprefix("www.").split(".")[0])
+    d = (AGENT_WORKSPACE / "domain-skills" / (urlparse(url).hostname or "").removeprefix("www.").split(".")[0])
     return {**r, "domain_skills": sorted(p.name for p in d.rglob("*.md"))[:10]} if d.is_dir() else r
 
 def page_info():
@@ -72,47 +174,8 @@ def page_info():
     dialog = _send({"meta": "pending_dialog"}).get("dialog")
     if dialog:
         return {"dialog": dialog}
-    r = cdp("Runtime.evaluate",
-            expression="JSON.stringify({url:location.href,title:document.title,w:innerWidth,h:innerHeight,sx:scrollX,sy:scrollY,pw:document.documentElement.scrollWidth,ph:document.documentElement.scrollHeight})",
-            returnByValue=True)
-    return json.loads(r["result"]["value"])
-
-def page_text(separator=" ", max_chars=None):
-    """Visible page text, normalized for quick research/scraping passes."""
-    text = js("return document.body ? document.body.innerText : ''") or ""
-    text = separator.join(text.split())
-    return text[:max_chars] if max_chars else text
-
-def page_links(limit=50):
-    """Visible links from the current page: [{text, href}, ...]."""
-    links = js("""
-return Array.from(document.querySelectorAll('a'))
-  .map(a => ({text: (a.innerText || a.textContent || '').trim(), href: a.href}))
-  .filter(x => x.text && x.href)
-""") or []
-    return links[:limit]
-
-def snippets(needles, context=350, limit=10):
-    """Find text snippets around one or more needles in the current page."""
-    if isinstance(needles, str):
-        needles = [needles]
-    text = page_text()
-    low = text.lower()
-    out = []
-    for needle in needles:
-        n = needle.lower()
-        start = 0
-        while len(out) < limit:
-            idx = low.find(n, start)
-            if idx < 0:
-                break
-            out.append(text[max(0, idx - context):idx + len(needle) + context])
-            start = idx + len(needle)
-    return out
-
-def print_json(value):
-    """Pretty-print data without escaping non-ASCII text."""
-    print(json.dumps(value, ensure_ascii=False, indent=2))
+    expression = "JSON.stringify({url:location.href,title:document.title,w:innerWidth,h:innerHeight,sx:scrollX,sy:scrollY,pw:document.documentElement.scrollWidth,ph:document.documentElement.scrollHeight})"
+    return json.loads(_runtime_evaluate(expression))
 
 # --- input ---
 _debug_click_counter = 0
@@ -123,7 +186,7 @@ def click_at_xy(x, y, button="left", clicks=1):
         try:
             from PIL import Image, ImageDraw
             dpr = js("window.devicePixelRatio") or 1
-            path = capture_screenshot(f"/tmp/debug_click_{_debug_click_counter}.png")
+            path = capture_screenshot(str(Path(tempfile.gettempdir()) / f"debug_click_{_debug_click_counter}.png"))
             img = Image.open(path)
             draw = ImageDraw.Draw(img)
             px, py = int(x * dpr), int(y * dpr)
@@ -166,9 +229,18 @@ def scroll(x, y, dy=-300, dx=0):
 
 
 # --- visual ---
-def capture_screenshot(path="/tmp/shot.png", full=False):
+def capture_screenshot(path=None, full=False, max_dim=None):
+    """Save a PNG of the current viewport. Set max_dim=1800 on a 2× display to
+    keep the file under the 2000px-per-side limit some image-aware LLMs enforce."""
+    path = path or str(Path(tempfile.gettempdir()) / "shot.png")
     r = cdp("Page.captureScreenshot", format="png", captureBeyondViewport=full)
     open(path, "wb").write(base64.b64decode(r["data"]))
+    if max_dim:
+        from PIL import Image
+        img = Image.open(path)
+        if max(img.size) > max_dim:
+            img.thumbnail((max_dim, max_dim))
+            img.save(path)
     return path
 
 
@@ -182,186 +254,25 @@ def list_tabs(include_chrome=True):
         out.append({"targetId": t["targetId"], "title": t.get("title", ""), "url": url})
     return out
 
-def _browser_process_stats():
-    """Best-effort local Chrome/Edge process count and RSS in MB."""
-    names = ("chrome.exe", "msedge.exe") if platform.system() == "Windows" else ("Google Chrome", "chrome", "chromium", "msedge")
-    try:
-        if platform.system() == "Windows":
-            out = subprocess.check_output(["tasklist", "/FO", "CSV"], text=True, timeout=5)
-            rows = csv.DictReader(io.StringIO(out))
-            count, rss_kb = 0, 0
-            for row in rows:
-                image = (row.get("Image Name") or "").lower()
-                if image not in names:
-                    continue
-                count += 1
-                mem = (row.get("Mem Usage") or "0").replace("\xa0", " ").replace(",", "")
-                digits = "".join(ch for ch in mem if ch.isdigit())
-                rss_kb += int(digits or "0")
-            return {"chrome_processes": count, "rss_mb": round(rss_kb / 1024)}
-        out = subprocess.check_output(["ps", "-A", "-o", "comm=,rss="], text=True, timeout=5)
-        count, rss_kb = 0, 0
-        for line in out.splitlines():
-            parts = line.rsplit(None, 1)
-            if len(parts) != 2:
-                continue
-            comm, rss = parts
-            if not any(name.lower() in comm.lower() for name in names):
-                continue
-            count += 1
-            rss_kb += int(rss)
-        return {"chrome_processes": count, "rss_mb": round(rss_kb / 1024)}
-    except Exception:
-        return {"chrome_processes": None, "rss_mb": None}
-
-def browser_pressure(tab_warn=12, tab_critical=25, rss_warn_mb=1500, rss_critical_mb=3000):
-    """Quiet browser pressure check. Returns data; prints nothing and closes nothing."""
-    tabs = list_tabs(include_chrome=True)
-    real_tabs = [t for t in tabs if not t.get("url", "").startswith(INTERNAL)]
-    internal_tabs = len(tabs) - len(real_tabs)
-    stats = _browser_process_stats()
-    tab_count = len(tabs)
-    rss_mb = stats["rss_mb"]
-    pressure = "ok"
-    if tab_count >= tab_critical or (rss_mb is not None and rss_mb >= rss_critical_mb):
-        pressure = "critical"
-    elif tab_count >= tab_warn or (rss_mb is not None and rss_mb >= rss_warn_mb):
-        pressure = "warn"
-    suggestion = None
-    if pressure == "critical":
-        suggestion = "reuse_tab_or_close_harness_tabs"
-    elif pressure == "warn":
-        suggestion = "reuse_tab"
-    cur = current_tab()
-    return {
-        "tabs": tab_count,
-        "real_tabs": len(real_tabs),
-        "internal_tabs": internal_tabs,
-        "chrome_processes": stats["chrome_processes"],
-        "rss_mb": rss_mb,
-        "active_tab_url": cur.get("url", ""),
-        "pressure": pressure,
-        "suggestion": suggestion,
-    }
-
-tab_pressure = browser_pressure
-
-def _same_host(a, b):
-    try:
-        return (urlparse(a).hostname or "").removeprefix("www.") == (urlparse(b).hostname or "").removeprefix("www.")
-    except Exception:
-        return False
-
-def reuse_or_new_tab(url="about:blank", reuse_host=True, max_tabs=15):
-    """Open `url`, preferring an existing tab before creating more browser pressure.
-
-    Reuse order: exact URL, same host when `reuse_host` is true, then the current
-    real tab once `max_tabs` is reached. Returns the target id in all cases.
-    """
-    tabs = list_tabs(include_chrome=False)
-    for t in tabs:
-        if t.get("url") == url:
-            switch_tab(t["targetId"])
-            return t["targetId"]
-    if url != "about:blank" and reuse_host:
-        for t in tabs:
-            if _same_host(t.get("url", ""), url):
-                switch_tab(t["targetId"])
-                goto_url(url)
-                return t["targetId"]
-    if len(list_tabs(include_chrome=True)) >= max_tabs and url != "about:blank":
-        try:
-            cur = current_tab()
-            if cur.get("targetId") and cur.get("url") and not cur["url"].startswith(INTERNAL):
-                goto_url(url)
-                return cur["targetId"]
-        except Exception:
-            pass
-        if tabs:
-            switch_tab(tabs[0]["targetId"])
-            goto_url(url)
-            return tabs[0]["targetId"]
-    return new_tab(url)
-
-open_or_reuse_tab = reuse_or_new_tab
-
-def close_harness_tabs(keep_current=True, close_blank=True, close_inspect=True, close_duplicate_urls=False):
-    """Close clearly technical harness tabs. Does not close arbitrary user pages."""
-    current_id = None
-    if keep_current:
-        try:
-            current_id = current_tab().get("targetId")
-        except Exception:
-            current_id = None
-    seen_urls = set()
-    closed = []
-    for t in list_tabs(include_chrome=True):
-        tid, url = t.get("targetId"), t.get("url", "")
-        if keep_current and tid == current_id:
-            seen_urls.add(url)
-            continue
-        technical = (
-            (close_blank and url == "about:blank") or
-            (close_inspect and url.startswith("chrome://inspect")) or
-            (close_duplicate_urls and url and url in seen_urls and not url.startswith(INTERNAL))
-        )
-        if not technical:
-            seen_urls.add(url)
-            continue
-        try:
-            cdp("Target.closeTarget", targetId=tid)
-            closed.append(t)
-        except Exception:
-            pass
-        seen_urls.add(url)
-    return closed
-
 def current_tab():
-    try:
-        info = page_info()
-        url = info.get("url")
-        title = info.get("title", "").removeprefix("\U0001F7E2 ")
-        for t in list_tabs(include_chrome=True):
-            if url and t.get("url") == url:
-                return t
-            if title and t.get("title", "").removeprefix("\U0001F7E2 ") == title:
-                return t
-    except Exception:
-        pass
     t = cdp("Target.getTargetInfo").get("targetInfo", {})
     return {"targetId": t.get("targetId"), "url": t.get("url", ""), "title": t.get("title", "")}
-
-def attach_target(target_id, activate=True):
-    """Attach to any CDP target and make it the default session."""
-    if activate:
-        try: cdp("Target.activateTarget", targetId=target_id)
-        except Exception: pass
-    sid = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"]
-    return use_session(sid)
-
-def browser_state(include_chrome=False, events=10):
-    """Compact state dump for debugging target/session/page issues."""
-    ev = drain_events()
-    return {
-        "session_id": current_session(),
-        "current_tab": current_tab(),
-        "page_info": page_info(),
-        "tabs": list_tabs(include_chrome=include_chrome),
-        "events": ev[-events:],
-    }
 
 def _mark_tab():
     """Prepend 🟢 to tab title so the user can see which tab the agent controls."""
     try: cdp("Runtime.evaluate", expression="if(!document.title.startsWith('\U0001F7E2'))document.title='\U0001F7E2 '+document.title")
     except Exception: pass
 
-def switch_tab(target_id):
+def switch_tab(target):
+    # Accept either a raw targetId string or the dict returned by current_tab() / list_tabs(),
+    # so `switch_tab(current_tab())` works without a manual ["targetId"] dance.
+    target_id = target.get("targetId") if isinstance(target, dict) else target
     # Unmark old tab
     try: cdp("Runtime.evaluate", expression="if(document.title.startsWith('\U0001F7E2 '))document.title=document.title.slice(2)")
     except Exception: pass
     cdp("Target.activateTarget", targetId=target_id)
     sid = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"]
-    _send({"meta": "set_session", "session_id": sid})
+    _send({"meta": "set_session", "session_id": sid, "target_id": target_id})
     _mark_tab()
     return sid
 
@@ -420,10 +331,9 @@ def js(expression, *args, target_id=None):
     sid = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"] if target_id else None
     if args:
         expression = f"(function(){{{expression}}}).apply(null, {json.dumps(args)})"
-    elif "return " in expression and not expression.strip().startswith("("):
+    elif _has_return_statement(expression) and not expression.strip().startswith("("):
         expression = f"(function(){{{expression}}})()"
-    r = cdp("Runtime.evaluate", session_id=sid, expression=expression, returnByValue=True, awaitPromise=True)
-    return r.get("result", {}).get("value")
+    return _runtime_evaluate(expression, session_id=sid, await_promise=True)
 
 
 _KC = {"Enter": 13, "Tab": 9, "Escape": 27, "Backspace": 8, " ": 32, "ArrowLeft": 37, "ArrowUp": 38, "ArrowRight": 39, "ArrowDown": 40}
@@ -465,3 +375,21 @@ def http_get(url, headers=None, timeout=20.0):
         data = r.read()
         if r.headers.get("Content-Encoding") == "gzip": data = gzip.decompress(data)
         return data.decode()
+
+
+def _load_agent_helpers():
+    p = AGENT_WORKSPACE / "agent_helpers.py"
+    if not p.exists():
+        return
+    spec = importlib.util.spec_from_file_location("browser_harness_agent_helpers", p)
+    if not spec or not spec.loader:
+        return
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for name, value in vars(module).items():
+        if name.startswith("_"):
+            continue
+        globals()[name] = value
+
+
+_load_agent_helpers()

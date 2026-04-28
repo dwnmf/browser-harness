@@ -1,12 +1,14 @@
-import json, os, socket, sys, tempfile
+import json, os, sys
 from pathlib import Path
 
+# Windows default stdout encoding is cp1252, which can't encode the 🟢 marker
+# helpers prepend to tab titles (or anything else outside Latin-1). Force UTF-8
+# so `print(page_info())` doesn't UnicodeEncodeError on Windows. Issue #124(4).
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    try: sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception: pass
 
-from admin import (
+from .admin import (
     _version,
     ensure_daemon,
     list_cloud_profiles,
@@ -20,16 +22,18 @@ from admin import (
     stop_remote_daemon,
     sync_local_profile,
 )
-from helpers import *
-
-NAME = os.environ.get("BU_NAME", "default")
+from . import _ipc as ipc
+from .helpers import *
 
 HELP = """Browser Harness
 
 Read SKILL.md for the default workflow and examples.
 
 Typical usage:
-  browser-harness -c "ensure_real_tab(); print(page_info())"
+  browser-harness -c '
+  ensure_real_tab()
+  print(page_info())
+  '
 
 PowerShell stdin:
   @'
@@ -57,21 +61,19 @@ Commands:
 
 def _paths():
     root = Path(__file__).resolve().parent
-    tmp = Path(tempfile.gettempdir())
-    supports_unix = hasattr(socket, "AF_UNIX")
-    port = int(os.environ.get("BU_PORT", 39300 + (sum(ord(c) for c in NAME) % 1000)))
+    repo_root = root.parents[1]
     return {
-        "name": NAME,
-        "endpoint": f"/tmp/bu-{NAME}.sock" if supports_unix else f"127.0.0.1:{port}",
-        "log": str(tmp / f"bu-{NAME}.log"),
-        "pid": str(tmp / f"bu-{NAME}.pid"),
+        "name": os.environ.get("BU_NAME", "default"),
+        "endpoint": ipc.sock_addr(os.environ.get("BU_NAME", "default")),
+        "log": str(ipc.log_path(os.environ.get("BU_NAME", "default"))),
+        "pid": str(ipc.pid_path(os.environ.get("BU_NAME", "default"))),
         "files": {
             "run": str(root / "run.py"),
             "helpers": str(root / "helpers.py"),
             "daemon": str(root / "daemon.py"),
             "admin": str(root / "admin.py"),
-            "skill": str(root / "SKILL.md"),
-            "install": str(root / "install.md"),
+            "skill": str(repo_root / "SKILL.md"),
+            "install": str(repo_root / "install.md"),
         },
     }
 
@@ -102,6 +104,8 @@ def main():
         os.environ["BH_DEBUG_CLICKS"] = "1"
         args = args[1:]
     if args and args[0] == "-c":
+        if len(args) < 2:
+            sys.exit("Usage: browser-harness -c \"print(page_info())\" or pipe Python on stdin")
         code = args[1]
     elif not args and not sys.stdin.isatty():
         code = sys.stdin.read()

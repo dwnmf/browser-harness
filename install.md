@@ -5,7 +5,7 @@ description: Install and bootstrap browser-harness into the current agent, then 
 
 # browser-harness install
 
-Use this file only for first-time install, reconnect, or cold-start browser bootstrap. For day-to-day browser work, read `SKILL.md`. Always read `helpers.py` after cloning; that is where the functions and expected patterns live.
+Use this file only for first-time install, reconnect, or cold-start browser bootstrap. For day-to-day browser work, read `SKILL.md`. Task-specific edits belong in `agent-workspace/agent_helpers.py` and `agent-workspace/domain-skills/`.
 
 ## Install prompt contract
 
@@ -22,7 +22,7 @@ uv tool install -e .
 command -v browser-harness
 ```
 
-That keeps the command global while still pointing at the real repo checkout, so when the agent edits `helpers.py` the next `browser-harness` uses the new code immediately. Prefer a stable path like `~/Developer/browser-harness`, not `/tmp`.
+That keeps the command global while still pointing at the real repo checkout, so when the agent edits `agent-workspace/agent_helpers.py` the next `browser-harness` uses the new code immediately. Prefer a stable path like `~/Developer/browser-harness`, not `/tmp`.
 
 ## Make it global for the current agent
 
@@ -88,7 +88,7 @@ If that fails with a stale websocket or stale socket, restart the daemon once an
 
 ```bash
 uv run python - <<'PY'
-from admin import restart_daemon
+from browser_harness.admin import restart_daemon
 restart_daemon()
 PY
 ```
@@ -114,7 +114,7 @@ Wait 5 seconds, then reconnect. This resets all CDP state.
 ## Architecture
 
 ```text
-Chrome / Browser Use cloud -> CDP WS -> daemon.py -> /tmp/bu-<NAME>.sock -> run.py
+Chrome / Browser Use cloud -> CDP WS -> browser_harness.daemon -> /tmp/bu-<NAME>.sock -> browser_harness.run
 ```
 
 - Protocol is one JSON line each way.
