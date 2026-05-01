@@ -1,3 +1,5 @@
+import pytest
+
 from browser_harness import admin
 
 
@@ -48,6 +50,7 @@ def test_stale_websocket_does_not_open_chrome_inspect():
 
 def test_daemon_endpoint_names_discovers_valid_socket_names(tmp_path, monkeypatch):
     monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
+    monkeypatch.setattr(admin.ipc, "BH_TMP_DIR", None)  # shared-tmpdir mode
     monkeypatch.setattr(admin.ipc, "_TMP", tmp_path)
     (tmp_path / "bu-default.sock").touch()
     (tmp_path / "bu-remote_1.sock").touch()
@@ -55,6 +58,25 @@ def test_daemon_endpoint_names_discovers_valid_socket_names(tmp_path, monkeypatc
     (tmp_path / "not-bu-default.sock").touch()
 
     assert admin._daemon_endpoint_names() == ["default", "remote_1"]
+
+
+def test_daemon_endpoint_names_with_bh_tmp_dir_returns_local_name_when_sock_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
+    monkeypatch.setattr(admin.ipc, "BH_TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(admin.ipc, "_TMP", tmp_path)
+    monkeypatch.setattr(admin, "NAME", "session-xyz")
+    (tmp_path / "bu.sock").touch()
+
+    assert admin._daemon_endpoint_names() == ["session-xyz"]
+
+
+def test_daemon_endpoint_names_with_bh_tmp_dir_returns_empty_when_sock_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
+    monkeypatch.setattr(admin.ipc, "BH_TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(admin.ipc, "_TMP", tmp_path)
+    monkeypatch.setattr(admin, "NAME", "session-xyz")
+
+    assert admin._daemon_endpoint_names() == []
 
 
 def test_active_browser_connections_counts_only_healthy_daemons(monkeypatch):
@@ -65,6 +87,19 @@ def test_active_browser_connections_counts_only_healthy_daemons(monkeypatch):
             raise ConnectionRefusedError()
         if name == "remote":
             return FakeSocket(b'{"error":"no close frame received or sent"}\n')
+        return FakeSocket()
+
+    monkeypatch.setattr(admin.ipc, "connect", fake_connect)
+
+    assert admin.active_browser_connections() == 1
+
+
+def test_active_browser_connections_skips_daemons_reporting_cdp_disconnected(monkeypatch):
+    monkeypatch.setattr(admin, "_daemon_endpoint_names", lambda: ["default", "stale"])
+
+    def fake_connect(name, timeout=1.0):
+        if name == "stale":
+            return FakeSocket(b'{"error":"cdp_disconnected"}\n')
         return FakeSocket()
 
     monkeypatch.setattr(admin.ipc, "connect", fake_connect)
@@ -136,3 +171,84 @@ def test_doctor_page_output_truncates_long_text(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "A very long page ..." in out
     assert "https://example.t..." in out
+
+
+def test_start_remote_daemon_stops_created_browser_when_daemon_start_fails(monkeypatch):
+    calls = []
+    browser = {"id": "browser-123", "cdpUrl": "http://127.0.0.1:9333", "liveUrl": "https://live.example"}
+
+    def fake_browser_use(path, method, body=None):
+        calls.append((path, method, body))
+        if (path, method) == ("/browsers", "POST"):
+            return browser
+        if (path, method) == ("/browsers/browser-123", "PATCH"):
+            return {}
+        raise AssertionError((path, method, body))
+
+    monkeypatch.setattr(admin, "daemon_alive", lambda name: False)
+    monkeypatch.setattr(admin, "_browser_use", fake_browser_use)
+    monkeypatch.setattr(admin, "_cdp_ws_from_url", lambda url: "ws://example.test/devtools/browser/1")
+    monkeypatch.setattr(admin, "ensure_daemon", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        admin.start_remote_daemon()
+
+    assert calls == [
+        ("/browsers", "POST", {}),
+        ("/browsers/browser-123", "PATCH", {"action": "stop"}),
+    ]
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
+def test_start_remote_daemon_stops_created_browser_when_daemon_start_is_interrupted(monkeypatch, exc_type):
+    calls = []
+    browser = {"id": "browser-123", "cdpUrl": "http://127.0.0.1:9333", "liveUrl": "https://live.example"}
+
+    def fake_browser_use(path, method, body=None):
+        calls.append((path, method, body))
+        if (path, method) == ("/browsers", "POST"):
+            return browser
+        if (path, method) == ("/browsers/browser-123", "PATCH"):
+            return {}
+        raise AssertionError((path, method, body))
+
+    monkeypatch.setattr(admin, "daemon_alive", lambda name: False)
+    monkeypatch.setattr(admin, "_browser_use", fake_browser_use)
+    monkeypatch.setattr(admin, "_cdp_ws_from_url", lambda url: "ws://example.test/devtools/browser/1")
+    monkeypatch.setattr(admin, "ensure_daemon", lambda **kwargs: (_ for _ in ()).throw(exc_type()))
+
+    with pytest.raises(exc_type):
+        admin.start_remote_daemon()
+
+    assert calls == [
+        ("/browsers", "POST", {}),
+        ("/browsers/browser-123", "PATCH", {"action": "stop"}),
+    ]
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
+def test_stop_cloud_browser_swallows_baseexception_from_stop_request(monkeypatch, exc_type):
+    monkeypatch.setattr(admin, "_browser_use", lambda *args, **kwargs: (_ for _ in ()).throw(exc_type()))
+
+    admin._stop_cloud_browser("browser-123")
+
+def test_start_remote_daemon_does_not_stop_created_browser_on_success(monkeypatch):
+    calls = []
+    browser = {"id": "browser-123", "cdpUrl": "http://127.0.0.1:9333", "liveUrl": "https://live.example"}
+
+    def fake_browser_use(path, method, body=None):
+        calls.append((path, method, body))
+        if (path, method) == ("/browsers", "POST"):
+            return browser
+        raise AssertionError((path, method, body))
+
+    monkeypatch.setattr(admin, "daemon_alive", lambda name: False)
+    monkeypatch.setattr(admin, "_browser_use", fake_browser_use)
+    monkeypatch.setattr(admin, "_cdp_ws_from_url", lambda url: "ws://example.test/devtools/browser/1")
+    monkeypatch.setattr(admin, "ensure_daemon", lambda **kwargs: None)
+    monkeypatch.setattr(admin, "_show_live_url", lambda url: None)
+
+    assert admin.start_remote_daemon() == browser
+    assert calls == [
+        ("/browsers", "POST", {}),
+    ]

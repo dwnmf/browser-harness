@@ -3,10 +3,13 @@ import asyncio, os, re, socket, subprocess, sys, tempfile
 from pathlib import Path
 
 IS_WINDOWS = sys.platform == "win32"
-# POSIX: /tmp keeps AF_UNIX paths under sun_path limits (104 on macOS, 108 on Linux).
-# tempfile.gettempdir() on macOS returns /var/folders/... (~49 chars) which combined with
-# a 64-char BU_NAME exceeds the limit. Windows uses TCP, so any tempdir is fine.
-_TMP = Path(tempfile.gettempdir()) if IS_WINDOWS else Path("/tmp")
+# BH_TMP_DIR set → caller-isolated dir, bare filenames (avoids AF_UNIX sun_path
+# overrun: 104 macOS / 108 Linux). Unset → shared tmpdir, "bu-<NAME>" prefix
+# disambiguates daemons. POSIX default is /tmp (gettempdir() returns long
+# /var/folders/... on macOS); Windows uses TCP so any tempdir is fine.
+BH_TMP_DIR = os.environ.get("BH_TMP_DIR")
+_TMP = Path(BH_TMP_DIR or (tempfile.gettempdir() if IS_WINDOWS else "/tmp"))
+_TMP.mkdir(parents=True, exist_ok=True)
 _NAME_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 
 
@@ -16,21 +19,31 @@ def _check(name):  # path-traversal guard for BU_NAME
     return name
 
 
-def log_path(name):   return _TMP / f"bu-{_check(name)}.log"
-def pid_path(name):   return _TMP / f"bu-{_check(name)}.pid"
-def port_path(name):  return _TMP / f"bu-{_check(name)}.port"  # Windows-only: holds the daemon's TCP port
-def _sock_path(name): return _TMP / f"bu-{_check(name)}.sock"
+def _stem(name):  # "bu" when BH_TMP_DIR isolates us, else "bu-<NAME>"
+    _check(name)
+    return "bu" if BH_TMP_DIR else f"bu-{name}"
+
+
+def log_path(name):   return _TMP / f"{_stem(name)}.log"
+def pid_path(name):   return _TMP / f"{_stem(name)}.pid"
+def port_path(name):  return _TMP / f"{_stem(name)}.port"  # Windows-only: holds the daemon's TCP port
+def _sock_path(name): return _TMP / f"{_stem(name)}.sock"
 
 
 def sock_addr(name):  # display-only, used in log lines
     if not IS_WINDOWS: return str(_sock_path(name))
     try: return f"127.0.0.1:{port_path(name).read_text().strip()}"
-    except FileNotFoundError: return f"tcp:bu-{_check(name)}"
+    except FileNotFoundError: return f"tcp:{_stem(name)}"
 
 
 def spawn_kwargs():  # subprocess.Popen flags so the daemon detaches from this terminal
     if IS_WINDOWS:
-        return {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
+        # CREATE_NO_WINDOW: no console window for the daemon. CREATE_NEW_PROCESS_GROUP:
+        # daemon doesn't receive Ctrl-C/Ctrl-Break sent to the parent terminal, so
+        # closing that terminal doesn't kill it. DETACHED_PROCESS is intentionally
+        # omitted: per Win32 docs it overrides CREATE_NO_WINDOW, causing Windows to
+        # allocate a fresh console for the (still console-subsystem) python.exe.
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
     return {"start_new_session": True}
 
 

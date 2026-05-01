@@ -37,11 +37,6 @@ VERSION_CACHE_TTL = 24 * 3600
 DOCTOR_TEXT_LIMIT = 140
 
 
-def _paths(name):
-    n = name or NAME
-    return ipc.sock_addr(n), str(ipc.pid_path(n))
-
-
 def _log_tail(name):
     try:
         return ipc.log_path(name or NAME).read_text().strip().splitlines()[-1]
@@ -81,14 +76,16 @@ def daemon_alive(name=None):
 
 
 def _daemon_endpoint_names():
-    pattern = "bu-*.port" if ipc.IS_WINDOWS else "bu-*.sock"
+    # BH_TMP_DIR isolates one daemon per dir → no filename-prefix discovery,
+    # just check whether our local endpoint exists. Without BH_TMP_DIR, _TMP
+    # is the shared default (`/tmp` etc.) and we glob `bu-*.<suffix>` to find
+    # every daemon on the machine.
     suffix = ".port" if ipc.IS_WINDOWS else ".sock"
+    if ipc.BH_TMP_DIR:
+        return [NAME] if (ipc._TMP / f"bu{suffix}").exists() else []
     names = []
-    for p in sorted(ipc._TMP.glob(pattern)):
-        name = p.name
-        if not name.startswith("bu-") or not name.endswith(suffix):
-            continue
-        raw = name[3:-len(suffix)]
+    for p in sorted(ipc._TMP.glob(f"bu-*{suffix}")):
+        raw = p.name[3:-len(suffix)]
         try:
             ipc._check(raw)
         except ValueError:
@@ -148,6 +145,8 @@ def ensure_daemon(wait=60.0, name=None, env=None, _open_inspect=True):
     if daemon_alive(name):
         # Stale daemons accept connects AND reply to meta:* (pure Python) even when the
         # CDP WS to Chrome is dead — probe with a real CDP call and require "result".
+        # Must go through ipc.connect so this works on Windows (TCP loopback) too;
+        # raw AF_UNIX here would fail on every warm call and churn the daemon.
         try:
             s = ipc.connect(name or NAME, timeout=3.0)
             s.sendall(b'{"method":"Target.getTargets","params":{}}\n')
@@ -205,7 +204,7 @@ def restart_daemon(name=None):
     ensure_daemon(). The function itself only stops."""
     import signal
 
-    _, pid_path = _paths(name)
+    pid_path = str(ipc.pid_path(name or NAME))
     try:
         c = ipc.connect(name or NAME, timeout=5.0)
         c.sendall(b'{"meta":"shutdown"}\n')
@@ -222,12 +221,12 @@ def restart_daemon(name=None):
             try:
                 os.kill(pid, 0)
                 time.sleep(0.2)
-            except (ProcessLookupError, OSError):
+            except (ProcessLookupError, OSError, SystemError):
                 break
         else:
             try:
                 os.kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
+            except (ProcessLookupError, OSError, SystemError):
                 pass
     ipc.cleanup_endpoint(name or NAME)
     try:
@@ -247,6 +246,15 @@ def _browser_use(path, method, body=None):
         headers={"X-Browser-Use-API-Key": key, "Content-Type": "application/json"},
     )
     return json.loads(urllib.request.urlopen(req, timeout=60).read() or b"{}")
+
+
+def _stop_cloud_browser(browser_id):
+    if not browser_id:
+        return
+    try:
+        _browser_use(f"/browsers/{browser_id}", "PATCH", {"action": "stop"})
+    except BaseException:
+        pass
 
 
 def _cdp_ws_from_url(cdp_url):
@@ -339,10 +347,14 @@ def start_remote_daemon(name="remote", profileName=None, **create_kwargs):
             raise RuntimeError("pass profileName OR profileId, not both")
         create_kwargs["profileId"] = _resolve_profile_name(profileName)
     browser = _browser_use("/browsers", "POST", create_kwargs)
-    ensure_daemon(
-        name=name,
-        env={"BU_CDP_WS": _cdp_ws_from_url(browser["cdpUrl"]), "BU_BROWSER_ID": browser["id"]},
-    )
+    try:
+        ensure_daemon(
+            name=name,
+            env={"BU_CDP_WS": _cdp_ws_from_url(browser["cdpUrl"]), "BU_BROWSER_ID": browser["id"]},
+        )
+    except BaseException:
+        _stop_cloud_browser(browser.get("id"))
+        raise
     _show_live_url(browser.get("liveUrl"))
     return browser
 

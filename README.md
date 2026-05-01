@@ -2,9 +2,9 @@
 
 # Browser Harness ♞
 
-The simplest, thinnest, **self-healing** harness that gives LLM **complete freedom** to complete any browser task. Built directly on CDP.
+Connect an LLM directly to your real browser with a thin, editable CDP harness. For browser tasks where you need **complete freedom**.
 
-The agent writes what's missing, mid-task, inside `agent-workspace/`. No framework, no recipes, no rails. One websocket to Chrome, nothing between.
+One websocket to Chrome, nothing between. The agent writes what's missing during execution. The harness improves itself every run.
 
 ```
   ● agent: wants to upload a file

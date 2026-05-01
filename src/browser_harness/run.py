@@ -1,4 +1,4 @@
-import json, os, sys
+import json, os, sys, urllib.request
 from pathlib import Path
 
 # Windows default stdout encoding is cp1252, which can't encode the 🟢 marker
@@ -10,6 +10,8 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from .admin import (
     _version,
+    NAME,
+    daemon_alive,
     ensure_daemon,
     list_cloud_profiles,
     list_local_profiles,
@@ -78,6 +80,18 @@ def _paths():
     }
 
 
+# Probe /json/version (not a bare TCP connect) so a non-Chrome process bound to
+# 9222/9223 doesn't masquerade as Chrome and skip the cloud bootstrap. Mirrors
+# daemon.py's fallback probe.
+def _local_chrome_listening():
+    for port in (9222, 9223):
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=0.3).close()
+            return True
+        except OSError: pass
+    return False
+
+
 def main():
     args = sys.argv[1:]
     if args and args[0] in {"-h", "--help"}:
@@ -112,6 +126,8 @@ def main():
     else:
         sys.exit("Usage: browser-harness -c \"print(page_info())\" or pipe Python on stdin")
     print_update_banner()
+    if not daemon_alive() and not _local_chrome_listening() and os.environ.get("BROWSER_USE_API_KEY"):
+        start_remote_daemon(NAME)
     ensure_daemon()
     exec(code, globals())
 

@@ -1,5 +1,5 @@
 """CDP WS holder + IPC relay (Unix socket on POSIX, TCP loopback on Windows). One daemon per BU_NAME."""
-import asyncio, json, os, socket, sys, time, urllib.request
+import asyncio, json, os, socket, sys, time, urllib.error, urllib.request
 from collections import deque
 from pathlib import Path
 
@@ -34,6 +34,8 @@ PID = str(ipc.pid_path(NAME))
 BUF = 500
 PROFILES = [
     Path.home() / "Library/Application Support/Google/Chrome",
+    Path.home() / "Library/Application Support/Comet",
+    Path.home() / "Library/Application Support/Arc/User Data",
     Path.home() / "Library/Application Support/Microsoft Edge",
     Path.home() / "Library/Application Support/Microsoft Edge Beta",
     Path.home() / "Library/Application Support/Microsoft Edge Dev",
@@ -91,25 +93,32 @@ def get_ws_url():
         raise RuntimeError(f"BU_CDP_URL={url} unreachable after 30s: {last_err} -- is the dedicated automation Chrome running?")
     for base in PROFILES:
         try:
-            port, path = (base / "DevToolsActivePort").read_text().strip().split("\n", 1)
+            active = (base / "DevToolsActivePort").read_text().splitlines()
         except (FileNotFoundError, NotADirectoryError):
             continue
+        port = active[0].strip() if active else ""
+        ws_path = active[1].strip() if len(active) > 1 else ""
+        if not port:
+            continue
+        # Resolve the live WS URL via /json/version instead of trusting the path stored
+        # alongside the port in DevToolsActivePort: if Chrome was previously launched
+        # with a different --user-data-dir on the same port, that file is left behind
+        # with a stale browser UUID and the WS upgrade returns 404.
         deadline = time.time() + 30
-        while True:
-            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            probe.settimeout(1)
+        while time.time() < deadline:
             try:
-                probe.connect(("127.0.0.1", int(port.strip())))
-                break
-            except OSError:
-                if time.time() >= deadline:
-                    raise RuntimeError(
-                        f"Chrome's remote-debugging page is open, but DevTools is not live yet on 127.0.0.1:{port.strip()} — if Chrome opened a profile picker, choose your normal profile first, then tick the checkbox and click Allow if shown"
-                    )
+                return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1).read())["webSocketDebuggerUrl"]
+            except urllib.error.HTTPError as e:
+                # Chrome 147+ disables /json/* HTTP discovery on the default user-data-dir;
+                # the ws path Chrome wrote to DevToolsActivePort still works.
+                if e.code == 404 and ws_path:
+                    return f"ws://127.0.0.1:{port}{ws_path}"
                 time.sleep(1)
-            finally:
-                probe.close()
-        return f"ws://127.0.0.1:{port.strip()}{path.strip()}"
+            except (OSError, KeyError, ValueError):
+                time.sleep(1)
+        raise RuntimeError(
+            f"Chrome's remote-debugging page is open, but DevTools is not live yet on 127.0.0.1:{port} -- if Chrome opened a profile picker, choose your normal profile first, then tick the checkbox and click Allow if shown"
+        )
     probe_ports = []
     for raw in os.environ.get("BU_CDP_PORT", "9222,9223").split(","):
         raw = raw.strip()
@@ -216,18 +225,19 @@ class Daemon:
             return {"events": out}
         if meta == "session":     return {"session_id": self.session}
         if meta == "connection_status":
+            if not self.target_id:
+                return {"error": "not_attached"}
+            try:
+                info = (await self.cdp.send_raw("Target.getTargetInfo", {"targetId": self.target_id}))["targetInfo"]
+            except Exception:
+                return {"error": "cdp_disconnected"}
             page = None
-            if self.target_id:
-                try:
-                    info = (await self.cdp.send_raw("Target.getTargetInfo", {"targetId": self.target_id}))["targetInfo"]
-                    if is_real_page(info):
-                        page = {
-                            "targetId": info.get("targetId"),
-                            "title": info.get("title") or "(untitled)",
-                            "url": info.get("url") or "",
-                        }
-                except Exception:
-                    page = None
+            if is_real_page(info):
+                page = {
+                    "targetId": info.get("targetId"),
+                    "title": info.get("title") or "(untitled)",
+                    "url": info.get("url") or "",
+                }
             return {"target_id": self.target_id, "session_id": self.session, "page": page}
         if meta == "set_session":
             self.session = req.get("session_id")

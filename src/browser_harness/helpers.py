@@ -186,7 +186,7 @@ def click_at_xy(x, y, button="left", clicks=1):
         try:
             from PIL import Image, ImageDraw
             dpr = js("window.devicePixelRatio") or 1
-            path = capture_screenshot(str(Path(tempfile.gettempdir()) / f"debug_click_{_debug_click_counter}.png"))
+            path = capture_screenshot(str(ipc._TMP / f"debug_click_{_debug_click_counter}.png"))
             img = Image.open(path)
             draw = ImageDraw.Draw(img)
             px, py = int(x * dpr), int(y * dpr)
@@ -230,9 +230,9 @@ def scroll(x, y, dy=-300, dx=0):
 
 # --- visual ---
 def capture_screenshot(path=None, full=False, max_dim=None):
-    """Save a PNG of the current viewport. Set max_dim=1800 on a 2× display to
+    """Save a PNG of the current viewport. Set max_dim=1800 on a 2---- display to
     keep the file under the 2000px-per-side limit some image-aware LLMs enforce."""
-    path = path or str(Path(tempfile.gettempdir()) / "shot.png")
+    path = path or str(ipc._TMP / "shot.png")
     r = cdp("Page.captureScreenshot", format="png", captureBeyondViewport=full)
     open(path, "wb").write(base64.b64decode(r["data"]))
     if max_dim:
